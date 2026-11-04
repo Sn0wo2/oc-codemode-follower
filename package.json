@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "OpenCode V2 plugin: follow a trigger MCP server's enabled state and switch Code Mode for a target set of MCP servers",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sn0wo2/oc-codemode-follower.git"
+  },
   "packageManager": "bun@1.4.4",
   "main": "index.ts",
   "exports": {
