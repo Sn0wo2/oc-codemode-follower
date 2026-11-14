@@ -1,71 +1,53 @@
-import { spawnSync } from "node:child_process"
 import { appendFileSync } from "node:fs"
+import { join } from "node:path"
+import { $ } from "bun"
 
-function git(command, options = {}) {
-  const result = spawnSync("git", command, { encoding: "utf8", ...options })
-  if (result.status !== 0) {
-    throw new Error(`\`git ${command.join(" ")}\` failed: ${result.stderr?.trim() || result.stdout?.trim()}`)
-  }
-  return result.stdout?.trim()
-}
-
-function gitSucceeds(command) {
-  return spawnSync("git", command, { encoding: "utf8" }).status === 0
-}
-
-function main() {
+try {
   for (const name of ["GITHUB_OUTPUT", "VERSION", "GH_TOKEN", "DEFAULT_BRANCH"]) {
     if (!process.env[name]) throw new Error(`${name} is not set`)
   }
 
-  const version = process.env.VERSION
-  const tag = `v${version}`
-  const defaultBranch = process.env.DEFAULT_BRANCH
-  const packageDir = process.env.PACKAGE_DIR ?? "."
-  const manifest = packageDir === "." ? "package.json" : `${packageDir}/package.json`
-  const push = (...command) => git(["-c", "credential.helper=!gh auth git-credential", "push", ...command])
+  await $`git config user.name 'github-actions[bot]'`.quiet()
+  await $`git config user.email 'github-actions[bot]@users.noreply.github.com'`.quiet()
+  await $`git add -u -- ${join(process.env.PACKAGE_DIR ?? ".", "package.json")} bun.lock`.quiet()
 
-  git(["config", "user.name", "github-actions[bot]"])
-  git(["config", "user.email", "github-actions[bot]@users.noreply.github.com"])
-  git(["add", "-u", "--", manifest, "bun.lock"])
-
-  const tagExists = gitSucceeds(["show-ref", "--verify", "--quiet", `refs/tags/${tag}`])
-  const staged = !gitSucceeds(["diff", "--cached", "--quiet"])
+  const tagExists =
+    (await $`git show-ref --verify --quiet ${`refs/tags/v${process.env.VERSION}`}`.quiet().nothrow()).exitCode === 0
+  const staged = (await $`git diff --cached --quiet`.quiet().nothrow()).exitCode !== 0
   if (!staged && tagExists) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `sha=${git(["rev-parse", "HEAD"])}\n`)
-    console.log(`Tag ${tag} already points at the checked version; nothing to commit.`)
-    return
-  }
-
-  if (staged) git(["commit", "-m", `chore(release): bump version to ${version}`])
-  const releaseSha = git(["rev-parse", "HEAD"])
-
-  if (tagExists) {
-    git(["fetch", "origin", defaultBranch])
-    git(["checkout", "--detach", "FETCH_HEAD"])
-    const picked = spawnSync("git", ["cherry-pick", releaseSha], { encoding: "utf8" })
-    if (picked.status !== 0) {
-      if (!gitSucceeds(["diff", "--cached", "--quiet"])) {
-        throw new Error(`\`git cherry-pick ${releaseSha}\` failed: ${picked.stderr?.trim() || picked.stdout?.trim()}`)
-      }
-      git(["cherry-pick", "--skip"])
-      console.log(`Version bump for ${tag} is already on ${defaultBranch}; nothing to cherry-pick.`)
-    } else {
-      push("origin", `HEAD:refs/heads/${defaultBranch}`)
-      console.log(`Cherry-picked the version bump for ${tag} onto ${defaultBranch}.`)
-    }
+    appendFileSync(process.env.GITHUB_OUTPUT, `sha=${(await $`git rev-parse HEAD`.text()).trim()}\n`)
+    console.log(`Tag v${process.env.VERSION} already points at the checked version; nothing to commit.`)
   } else {
-    git(["tag", tag])
-    push("--atomic", "origin", `HEAD:refs/heads/${defaultBranch}`, `refs/tags/${tag}`)
-    console.log(`Tagged ${tag} and pushed it with ${defaultBranch}.`)
+    if (staged) await $`git commit -m ${`chore(release): bump version to ${process.env.VERSION}`}`.quiet()
+    const releaseSha = (await $`git rev-parse HEAD`.text()).trim()
+
+    if (tagExists) {
+      await $`git fetch origin ${process.env.DEFAULT_BRANCH}`.quiet()
+      await $`git checkout --detach FETCH_HEAD`.quiet()
+      const picked = await $`git cherry-pick ${releaseSha}`.quiet().nothrow()
+      if (picked.exitCode !== 0) {
+        if ((await $`git diff --cached --quiet`.quiet().nothrow()).exitCode !== 0) {
+          throw new Error(
+            `\`git cherry-pick ${releaseSha}\` failed: ${picked.stderr.toString().trim() || picked.stdout.toString().trim()}`,
+          )
+        }
+        await $`git cherry-pick --skip`.quiet()
+        console.log(
+          `Version bump for v${process.env.VERSION} is already on ${process.env.DEFAULT_BRANCH}; nothing to cherry-pick.`,
+        )
+      } else {
+        await $`git -c 'credential.helper=!gh auth git-credential' push origin ${`HEAD:refs/heads/${process.env.DEFAULT_BRANCH}`}`.quiet()
+        console.log(`Cherry-picked the version bump for v${process.env.VERSION} onto ${process.env.DEFAULT_BRANCH}.`)
+      }
+    } else {
+      await $`git tag ${`v${process.env.VERSION}`}`.quiet()
+      await $`git -c 'credential.helper=!gh auth git-credential' push --atomic origin ${`HEAD:refs/heads/${process.env.DEFAULT_BRANCH}`} ${`refs/tags/v${process.env.VERSION}`}`.quiet()
+      console.log(`Tagged v${process.env.VERSION} and pushed it with ${process.env.DEFAULT_BRANCH}.`)
+    }
+
+    appendFileSync(process.env.GITHUB_OUTPUT, `sha=${releaseSha}\n`)
   }
-
-  appendFileSync(process.env.GITHUB_OUTPUT, `sha=${releaseSha}\n`)
-}
-
-try {
-  main()
 } catch (error) {
-  console.error(error.message)
+  console.error(error.stderr?.toString().trim() || error.message)
   process.exitCode = 1
 }
